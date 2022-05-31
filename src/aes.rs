@@ -204,7 +204,7 @@ fn aes_set_decrypt_key(user_key: &[u8], key_bits: u16, key: &mut AesKey) {
 }
 
 /// Block buffer(s) to operate a single block crypto
-enum BlockBuf<'a> {
+pub(crate) enum BlockBuf<'a> {
     InPlace(&'a mut [u8]),            // Input and output are the same buffer
     FromTo((&'a [u8], &'a mut [u8])), // Input and output are separate buffers
 }

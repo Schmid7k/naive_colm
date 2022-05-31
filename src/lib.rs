@@ -1,12 +1,21 @@
 mod aes;
 
-use aes::{AES_DECRYPT, AES_ENCRYPT};
+use aes::{BlockBuf, AES_DECRYPT, AES_ENCRYPT};
 
 pub type Block = [u8; 16];
 
-fn xor_block(dest: &mut [u8], a: &[u8], b: &[u8]) {
-    for i in 0..16 {
-        dest[i] = a[i] ^ b[i];
+fn xor_block(buf: BlockBuf, a: &[u8]) {
+    match buf {
+        BlockBuf::InPlace(in_out) => {
+            for i in 0..16 {
+                in_out[i] ^= a[i];
+            }
+        },
+        BlockBuf::FromTo((_in, out)) => {
+            for i in 0..16 {
+                out[i] = _in[i] ^ a[i];
+            }
+        }
     }
 }
 
@@ -14,52 +23,88 @@ fn copy_block(dest: &mut [u8], src: &[u8]) {
     dest[..16].copy_from_slice(&src[..16]);
 }
 
-fn shl_block(res: &mut Block, a: &Block) {
-    for i in 0..15 {
-        res[i] = (a[i] << 1) | (a[i + 1] >> 7);
+fn shl_block(buf: BlockBuf) {
+    match buf {
+        BlockBuf::InPlace(in_out) => {
+            for i in 0..15 {
+                in_out[i] = (in_out[i] << 1) | (in_out[i + 1] >> 7);
+            }
+            in_out[15] <<= 1;
+        }
+        BlockBuf::FromTo((_in, out)) => {
+            for i in 0..15 {
+                out[i] = (_in[i] << 1) | (_in[i + 1] >> 7);
+            }
+            out[15] = _in[15] << 1;
+        }
     }
-    res[15] = a[15] << 1;
 }
 
-fn gf128_mul2(res: &mut Block, a: &Block) {
-    let msb = a[0] & 0x80;
-    shl_block(res, a);
-    if msb > 0 {
-        res[15] ^= 0x87;
+fn gf128_mul2(buf: BlockBuf) {
+    match buf {
+        BlockBuf::InPlace(in_out) => {
+            let msb = in_out[0] & 0x80;
+            shl_block(BlockBuf::InPlace(in_out));
+            if msb > 0 {
+                in_out[15] ^= 0x87;
+            }
+        }
+        BlockBuf::FromTo((_in, out)) => {
+            let msb = _in[0] & 0x80;
+            shl_block(BlockBuf::FromTo((_in, out)));
+            if msb > 0 {
+                out[15] ^= 0x87;
+            }
+        }
     }
 }
 
-fn gf128_mul3(res: &mut Block, a: &Block) {
+fn gf128_mul3(buf: BlockBuf) {
     let mut b = [0u8; 16];
-    gf128_mul2(&mut b, a);
-    xor_block(res, &b, a)
+    match buf {
+        BlockBuf::InPlace(in_out) => {
+            gf128_mul2(BlockBuf::FromTo((in_out, &mut b)));
+            xor_block(BlockBuf::InPlace(in_out), &b);
+        },
+        BlockBuf::FromTo((_in, out)) => {
+            gf128_mul2(BlockBuf::FromTo((_in, &mut b)));
+            xor_block(BlockBuf::FromTo((&b, out)), _in);
+        }
+    }
 }
 
-fn gf128_mul7(res: &mut Block, a: &Block) {
+fn gf128_mul7(buf: BlockBuf) {
     let mut b = [0u8; 16];
     let mut c = [0u8; 16];
-    gf128_mul2(&mut b, a);
-    gf128_mul2(&mut c, &b);
-    let c2 = c;
-    xor_block(&mut c, &c2, &b);
-    xor_block(res, &c, a);
+    match buf {
+        BlockBuf::InPlace(in_out) => {
+            gf128_mul2(BlockBuf::FromTo((in_out, &mut b)));
+            gf128_mul2(BlockBuf::FromTo((&b, &mut c)));
+            xor_block(BlockBuf::InPlace(&mut c), &in_out);
+            xor_block(BlockBuf::InPlace(in_out), &c);
+        },
+        BlockBuf::FromTo((_in, out)) => {
+            gf128_mul2(BlockBuf::FromTo((_in, &mut b)));
+            gf128_mul2(BlockBuf::FromTo((&b, &mut c)));
+            xor_block(BlockBuf::InPlace(&mut c), _in);
+            xor_block(BlockBuf::FromTo((&c, out)), _in);
+        }
+    }
 }
 
 fn rho(block: &mut Block, w: &mut Block) {
     let mut new_w = [0u8; 16];
-    gf128_mul2(&mut new_w, w);
-    let new_w2 = new_w;
-    xor_block(&mut new_w, &new_w2, block);
-    xor_block(block, &new_w, w);
+    gf128_mul2(BlockBuf::FromTo((w, &mut new_w)));
+    xor_block(BlockBuf::InPlace(&mut new_w), block);
+    xor_block(BlockBuf::FromTo((&new_w, block)), w);
     copy_block(w, &new_w)
 }
 
 fn rho_inv(block: &mut Block, w: &mut Block) {
     let mut new_w = [0u8; 16];
-    gf128_mul2(&mut new_w, w);
-    let w2 = *w;
-    xor_block(w, &w2, block);
-    xor_block(block, &new_w, w)
+    gf128_mul2(BlockBuf::FromTo((w, &mut new_w)));
+    xor_block(BlockBuf::InPlace(w), block);
+    xor_block(BlockBuf::FromTo((&new_w, block)), w);
 }
 
 fn mac(out: &mut [u8], _in: &[u8], nonce: &[u8; 8], ll: &Block, key: &Block) {
@@ -69,25 +114,18 @@ fn mac(out: &mut [u8], _in: &[u8], nonce: &[u8; 8], ll: &Block, key: &Block) {
     let mut previous = 0;
     let mut current = 16;
 
-    gf128_mul3(&mut delta, ll);
+    gf128_mul3(BlockBuf::FromTo((ll, &mut delta)));
     v[..8].copy_from_slice(&nonce[..]);
-    let v2 = v;
-    xor_block(&mut v, &v2, &delta);
+    xor_block(BlockBuf::InPlace(&mut v), &delta);
 
     AES_ENCRYPT(&mut v, key);
 
     while len >= 16 {
-        let delta2 = delta;
-        gf128_mul2(&mut delta, &delta2);
-        xor_block(
-            &mut block,
-            &_in[previous..current],
-            &delta,
-        );
+        gf128_mul2(BlockBuf::InPlace(&mut delta));
+        xor_block(BlockBuf::FromTo((&_in[previous..current], &mut block)), &delta);
         AES_ENCRYPT(&mut block, key);
 
-        let v2 = v;
-        xor_block(&mut v, &v2, &block);
+        xor_block(BlockBuf::InPlace(&mut v), &block);
 
         previous += 16;
         current += 16;
@@ -95,14 +133,14 @@ fn mac(out: &mut [u8], _in: &[u8], nonce: &[u8; 8], ll: &Block, key: &Block) {
     }
 
     if len > 0 {
-        gf128_mul7(&mut block, &delta);
+        gf128_mul7(BlockBuf::FromTo((&delta, &mut block)));
         while i < len {
             block[i] ^= _in[i];
             i += 1;
         }
         block[len] ^= 0x80;
         AES_ENCRYPT(&mut block, key);
-        xor_block(out, &v, &block);
+        xor_block(BlockBuf::FromTo((&v, out)), &block);
     } else {
         copy_block(out, &v);
     }
@@ -121,32 +159,24 @@ fn crypto_aead_encrypt(c: &mut [u8], m: &[u8], ad: &[u8], npub: &[u8; 8], key: &
     AES_ENCRYPT(&mut ll, key);
 
     copy_block(&mut l_up, &ll);
-    gf128_mul3(&mut l_down, &ll);
-    let l_down2 = l_down;
-    gf128_mul3(&mut l_down, &l_down2);
+    gf128_mul3(BlockBuf::FromTo((&ll, &mut l_down)));
+    gf128_mul3(BlockBuf::InPlace(&mut l_down));
 
     mac(&mut w, ad, npub, &ll, key);
 
     while remaining > 16 {
-        let l_up2 = l_up;
-        gf128_mul2(&mut l_up, &l_up2);
-        let l_down2 = l_down;
-        gf128_mul2(&mut l_down, &l_down2);
+        gf128_mul2(BlockBuf::InPlace(&mut l_up));
+        gf128_mul2(BlockBuf::InPlace(&mut l_down));
 
-        let checksum2 = checksum;
-        xor_block(
-            &mut checksum,
-            &checksum2,
-            &m[out.._in],
-        );
-        xor_block(&mut block, &m[out.._in], &l_up);
+        xor_block(BlockBuf::InPlace(&mut checksum), &m[out.._in]);
+        xor_block(BlockBuf::FromTo((&m[out.._in], &mut block)), &l_up);
         AES_ENCRYPT(&mut block, key);
 
         rho(&mut block, &mut w);
 
         AES_ENCRYPT(&mut block, key);
 
-        xor_block(&mut c[out.._in], &block, &l_down);
+        xor_block(BlockBuf::FromTo((&block, &mut c[out.._in])), &l_down);
 
         _in += 16;
         out += 16;
@@ -158,38 +188,32 @@ fn crypto_aead_encrypt(c: &mut [u8], m: &[u8], ad: &[u8], npub: &[u8; 8], key: &
         i += 1;
     }
 
-    let l_up2 = l_up;
-    gf128_mul7(&mut l_up, &l_up2);
-    let l_down2 = l_down;
-    gf128_mul7(&mut l_down, &l_down2);
+    gf128_mul7(BlockBuf::InPlace(&mut l_up));
+    gf128_mul7(BlockBuf::InPlace(&mut l_down));
 
     if remaining < 16 {
         checksum[i] ^= 0x80;
-        let l_up2 = l_up;
-        gf128_mul7(&mut l_up, &l_up2);
-        let l_down2 = l_down;
-        gf128_mul7(&mut l_down, &l_down2);
+        gf128_mul7(BlockBuf::InPlace(&mut l_up));
+        gf128_mul7(BlockBuf::InPlace(&mut l_down));
     }
 
-    xor_block(&mut block, &checksum, &l_up);
+    xor_block(BlockBuf::FromTo((&checksum, &mut block)), &l_up);
     AES_ENCRYPT(&mut block, key);
 
     rho(&mut block, &mut w);
 
     AES_ENCRYPT(&mut block, key);
-    xor_block(&mut c[out.._in], &block, &l_down);
+    xor_block(BlockBuf::FromTo((&block, &mut c[out.._in])), &l_down);
     out += 16;
 
     if remaining == 0 {
         return;
     }
 
-    let l_up2 = l_up;
-    gf128_mul2(&mut l_up, &l_up2);
-    let l_down2 = l_down;
-    gf128_mul2(&mut l_down, &l_down2);
+    gf128_mul2(BlockBuf::InPlace(&mut l_up));
+    gf128_mul2(BlockBuf::InPlace(&mut l_down));
 
-    xor_block(&mut block, &checksum, &l_up);
+    xor_block(BlockBuf::FromTo((&checksum, &mut block)), &l_up);
     AES_ENCRYPT(&mut block, key);
 
     rho(&mut block, &mut w);
@@ -216,85 +240,67 @@ fn crypto_aead_decrypt(m: &mut [u8], c: &[u8], ad: &[u8], npub: &[u8; 8], key: &
 
     AES_ENCRYPT(&mut ll, key);
     copy_block(&mut l_up, &ll);
-    gf128_mul3(&mut l_down, &ll);
-    let l_down2 = l_down;
-    gf128_mul3(&mut l_down, &l_down2);
+    gf128_mul3(BlockBuf::FromTo((&ll, &mut l_down)));
+    gf128_mul3(BlockBuf::InPlace(&mut l_down));
 
     mac(&mut w, ad, npub, &ll, key);
 
     while remaining > 16 {
-        let l_up2 = l_up;
-        gf128_mul2(&mut l_up, &l_up2);
-        let l_down2 = l_down;
-        gf128_mul2(&mut l_down, &l_down2);
+        gf128_mul2(BlockBuf::InPlace(&mut l_up));
+        gf128_mul2(BlockBuf::InPlace(&mut l_down));
 
-        xor_block(&mut block, &c[out.._in], &l_down);
+        xor_block(BlockBuf::FromTo((&c[out.._in], &mut block)), &l_down);
         AES_DECRYPT(&mut block, key);
 
         rho_inv(&mut block, &mut w);
 
         AES_DECRYPT(&mut block, key);
-        xor_block(&mut m[out.._in], &block, &l_up);
+        xor_block(BlockBuf::FromTo((&block, &mut m[out.._in])), &l_up);
 
-        let checksum2 = checksum;
-        xor_block(
-            &mut checksum,
-            &checksum2,
-            &m[out.._in],
-        );
+        xor_block(BlockBuf::InPlace(&mut checksum), &m[out.._in]);
 
         _in += 16;
         out += 16;
         remaining -= 16;
     }
 
-    let l_up2 = l_up;
-    gf128_mul7(&mut l_up, &l_up2);
-    let l_down2 = l_down;
-    gf128_mul7(&mut l_down, &l_down2);
+    gf128_mul7(BlockBuf::InPlace(&mut l_up));
+    gf128_mul7(BlockBuf::InPlace(&mut l_down));
 
     if remaining < 16 {
-        let l_up2 = l_up;
-        gf128_mul7(&mut l_up, &l_up2);
-        let l_down2 = l_down;
-        gf128_mul7(&mut l_down, &l_down2);
+        gf128_mul7(BlockBuf::InPlace(&mut l_up));
+        gf128_mul7(BlockBuf::InPlace(&mut l_down));
     }
 
-    xor_block(&mut block, &c[out.._in], &l_down);
+    xor_block(BlockBuf::FromTo((&c[out.._in], &mut block)), &l_down);
     AES_DECRYPT(&mut block, key);
 
     rho_inv(&mut block, &mut w);
 
     AES_DECRYPT(&mut block, key);
-    let block2 = block;
-    xor_block(&mut block, &block2, &l_up);
+    xor_block(BlockBuf::InPlace(&mut block), &l_up);
 
-    let checksum2 = checksum;
-    xor_block(&mut checksum, &checksum2, &block);
+    xor_block(BlockBuf::InPlace(&mut checksum), &block);
 
     // output last (maybe partial) plaintext block
     m[out..].copy_from_slice(&checksum[..remaining]);
 
-    let l_up2 = l_up;
-    gf128_mul2(&mut l_up, &l_up2);
-    let l_down2 = l_down;
-    gf128_mul2(&mut l_down, &l_down2);
+    gf128_mul2(BlockBuf::InPlace(&mut l_up));
+    gf128_mul2(BlockBuf::InPlace(&mut l_down));
 
-    let block2 = block;
-    xor_block(&mut block, &block2, &l_up);
+    xor_block(BlockBuf::InPlace(&mut block), &l_up);
     AES_ENCRYPT(&mut block, key);
 
     rho(&mut block, &mut w);
 
     AES_ENCRYPT(&mut block, key);
-    let block2 = block;
-    xor_block(&mut block, &block2, &l_down);
+    xor_block(BlockBuf::InPlace(&mut block), &l_down);
 
     if remaining < 16 {
         if checksum[remaining] != 0x80 {
             panic!("Decryption Error: Wrong checksum!");
         }
-        for i in checksum.iter().skip(remaining+1) {
+        for i in checksum.iter().skip(remaining + 1) {
             if *i != 0 {
                 panic!("Decryption Error: Wrong checksum!");
             }
