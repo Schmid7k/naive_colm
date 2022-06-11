@@ -11,7 +11,7 @@ fn bench(c: &mut Criterion<CyclesPerByte>) {
     for nonce in NONCES.iter() {
         for key in KEYS.iter() {
             for ad in AD.iter().map(|s| s.as_bytes()) {
-                for m in PLAINTEXTS.iter_mut().map(|s| s.as_bytes()) {
+                for m in PLAINTEXTS.iter().map(|s| s.as_bytes()) {
                     let size = m.len();
                     let mut c = vec![0; size + 16];
 

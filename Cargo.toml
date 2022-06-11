@@ -12,12 +12,12 @@ criterion = "0.3.5"
 criterion-cycles-per-byte = "0.1.2"
 
 [profile.bench]
-opt-level = 3
-debug = false
-debug-assertions = false
-lto = "fat"
-rpath = false
-incremental = false
+#opt-level = 3
+#debug = false
+#debug-assertions = false
+#lto = "fat"
+#rpath = false
+#incremental = false
 
 [[bench]]
 name = "colm-0"

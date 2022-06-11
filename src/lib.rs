@@ -194,7 +194,7 @@ pub fn crypto_aead_encrypt(c: &mut [u8], m: &[u8], ad: &[u8], npub: &[u8; 8], ke
 }
 
 pub fn crypto_aead_decrypt(m: &mut [u8], c: &[u8], ad: &[u8], npub: &[u8; 8], key: &Block) {
-    assert!(c.len() >= 16);
+    assert!(c.len() >= m.len() + 16);
     let cipher_enc = Aes128Enc::new(&GenericArray::from(*key));
     let cipher_dec = Aes128Dec::new(&GenericArray::from(*key));
     let mut _in = 16;
@@ -253,8 +253,6 @@ pub fn crypto_aead_decrypt(m: &mut [u8], c: &[u8], ad: &[u8], npub: &[u8; 8], ke
     // output last (maybe partial) plaintext block
     m[out..].copy_from_slice(&checksum[..remaining]);
 
-    //FIXME: What is this part for:
-    //<----
     l_up = gf128_mul2(&l_up);
     l_down = gf128_mul2(&l_down);
 
@@ -265,16 +263,11 @@ pub fn crypto_aead_decrypt(m: &mut [u8], c: &[u8], ad: &[u8], npub: &[u8; 8], ke
 
     cipher_enc.encrypt_block(&mut GenericArray::from(block));
     block = xor_block(&block, &l_down);
-    //---->
 
     if remaining < 16 {
-        if checksum[remaining] != 0x80 {
-            panic!("Decryption Error: Wrong checksum!");
-        }
+        assert!(checksum[remaining] == 0x80);
         for i in checksum.iter().skip(remaining + 1) {
-            if *i != 0 {
-                panic!("Decryption Error: Wrong checksum!");
-            }
+            assert!(*i == 0);
         }
     }
 }
